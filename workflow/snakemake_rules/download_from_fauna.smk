@@ -150,6 +150,7 @@ rule remap_titer_strain_names:
         titers = "data/{lineage}/{center}_{passage}_{assay}_titers.tsv",
         fauna_strain_map = "data/{lineage}/fauna-strain-map.tsv.xz",
         curated_metadata = "data/{lineage}/curated-metadata-for-titer-matching.tsv.xz",
+        hardcoded_strain_map = lambda w: config['titer_strain_maps'][w.lineage],
     output:
         titers = "data/{lineage}/{center}_{passage}_{assay}_titers-strains-remapped.tsv",
         stats = "data/{lineage}/{center}_{passage}_{assay}_matching-stats.json",
@@ -164,6 +165,7 @@ rule remap_titer_strain_names:
         """
         scripts/remap-titer-strain-names.py \
             --fauna-strain-map {input.fauna_strain_map} \
+            --hardcoded-strain-map {input.hardcoded_strain_map} \
             --metadata {input.curated_metadata} \
             --titers {input.titers} \
             --output {output.titers} \
@@ -226,4 +228,3 @@ rule visualise_titer_matches:
         """
         ./scripts/titer-matching-viz.py --stats {input.stats} --output {output.png} 2> {log}
         """
-

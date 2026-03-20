@@ -37,6 +37,14 @@ def read_fauna_map(fname: str) -> dict[str,str]:
         fauna_map = {row['strain']:row['gisaid_epi_isl'] for row in reader}
     print(f"Parsed fauna strain map ({fname}). n={len(fauna_map):,}", file=sys.stderr)
     return fauna_map
+    
+def read_hardcoded_strain_map(fname: str) -> dict[str,str]:
+    with open_file(fname) as f:
+        reader = csv.reader(f, delimiter='\t')
+        next(reader) # header
+        strain_map = {row[0]:row[1] for row in reader}
+    print(f"Parsed hardcoded strain map ({fname}). n={len(strain_map):,}", file=sys.stderr)
+    return strain_map
 
 UNKNOWN_YEAR = 'unknown'
 def parse_year(date:str) -> int|str:
@@ -96,19 +104,36 @@ type Match = tuple[str, str|None]
 def match(titer_strain: str,
           cache: dict[str,str],
           fauna_map: dict[str,str],
+          hardcoded_map: dict[str,str],
           metadata: Metadata,
           epi_isl_to_strain: dict[str, str],
           simplified_metadata: dict[str,str],
-          matching_if_simplified_strain_pairs: defaultdict[tuple[str,str], int]
+          matching_if_simplified_strain_pairs: defaultdict[tuple[str,str], int],
+          hardcoded_strains_not_found_in_metadata: defaultdict[tuple[str,str], int],
           )->Match:
-    """"
-    Returns a tuple with the match result ("no", "maybe", "yes") and the strain name.
-    If the result is "no" then the strain name wasn't matched and the returnder strain is the input strain.
-    If the result is "yes" then the returned strain is (potentially) corrected such that it matches our metadata.
-    If the result is "maybe" then the strain name is returned unchanged but there's a potential matching strain - see logs.
+    f""""
+    Matches **titer_strain** against metadata and potentially updates the titer strain name.
+    
+    Returns a tuple with two elements:
+       1. Whether the (updated) titer strain is found in the metadata. Values: {"no", "maybe", "yes"}.
+          A value of "no" indicates that no match was found despite attempting to match.
+          A value of "maybe" indicates that a plausible strain name match was found, but we are not automatically
+          applying it (see the log file)
+          A value of "yes" indicates that a match was found and the returned strain name is found in the metadata.
+       2. The (updated) strain name if index[0] is "yes", else `None`
     """
+    # hardcoded map takes precedence over everything, and avoids the cache entirely
+    # because the new (curated) strain name from the hardcoded map may not be in the curated metadata!
+    if titer_strain in hardcoded_map:
+        curated_strain = hardcoded_map[titer_strain]
+        if curated_strain in metadata:
+            return ("yes", curated_strain)
+        else:
+            hardcoded_strains_not_found_in_metadata[titer_strain, curated_strain]+=1
+            return ("no", None)
+
     if titer_strain in cache:
-        return ("yes", cache[titer_strain])
+        return ("yes", cache[titer_strain])    
 
     if titer_strain in metadata:
         curated_strain = titer_strain # they're the same!
@@ -121,9 +146,6 @@ def match(titer_strain: str,
             curated_strain = epi_isl_to_strain[epi_isl]
             cache[titer_strain] = curated_strain
             return ("yes", curated_strain)
-    
-    # TODO XXX add a way to provide a hardcoded mapping of titer-strain-name to new-strain-name
-    # and apply those matches here.
 
     # Don't actually match strains in simplified space, but log them into matching_if_simplified_strain_pairs
     strain_simple = simplify_strain(titer_strain)
@@ -194,7 +216,7 @@ def track_matches(matches,
     matches['strains'][original_virus_strain] = (virus_match[0], virus_strain_year)
     matches['strains'][original_serum_strain] = (serum_match[1], serum_strain_year)
 
-    # and store whther the pair of strains (i.e. the measurement) matched
+    # and store whether the pair of strains (i.e. the measurement) matched
     if virus_match[0]=='no' or virus_match[0]=='no':
         measurement_match_result = 'no'
     elif virus_match[0]=='maybe' or virus_match[0]=='maybe':
@@ -231,6 +253,8 @@ if __name__ == '__main__':
                         help="Titers TSV with column 'virus_strain' and 'serum_strain'")
     parser.add_argument("--fauna-strain-map", required=True, metavar='TSV',
                         help="TSV file which maps (fauna) strain name to EPI_ISL")
+    parser.add_argument("--hardcoded-strain-map", required=True, metavar='TSV',
+                        help="TSV file which maps (fauna) strain name (curated) strain name. Takes precedence over any other approach to correct names")
     parser.add_argument("--metadata", required=True, metavar='TSV',
                         help="Curated metadata TSV")
     parser.add_argument("--output", required=True, metavar='TSV',
@@ -253,6 +277,7 @@ if __name__ == '__main__':
         'measurements': _measurements_matches,
     }
 
+    hardcoded_map = read_hardcoded_strain_map(args.hardcoded_strain_map)
     fauna_map = read_fauna_map(args.fauna_strain_map)
     titers = read_titers(args.titers)
     metadata = parse_metadata(args.metadata)
@@ -260,13 +285,14 @@ if __name__ == '__main__':
     simplified_metadata = simplify_metadata(metadata)
     # Track pairs of strains (titer-strain, curated-strain) which would match if simplified
     matching_if_simplified_strain_pairs: defaultdict[tuple[str,str], int] = defaultdict(int)
+    hardcoded_strains_not_found_in_metadata: defaultdict[tuple[str,str], int] = defaultdict(int)
 
     for row in titers:
         old_virus_strain = row['virus_strain']
         old_serum_strain = row['serum_strain']
 
-        virus_match = match(old_virus_strain, cache, fauna_map, metadata, epi_isl_to_strain, simplified_metadata, matching_if_simplified_strain_pairs)
-        serum_match = match(old_serum_strain, cache, fauna_map, metadata, epi_isl_to_strain, simplified_metadata, matching_if_simplified_strain_pairs)
+        virus_match = match(old_virus_strain, cache, fauna_map, hardcoded_map, metadata, epi_isl_to_strain, simplified_metadata, matching_if_simplified_strain_pairs, hardcoded_strains_not_found_in_metadata)
+        serum_match = match(old_serum_strain, cache, fauna_map, hardcoded_map, metadata, epi_isl_to_strain, simplified_metadata, matching_if_simplified_strain_pairs, hardcoded_strains_not_found_in_metadata)
 
         track_matches(matches, old_virus_strain, virus_match, old_serum_strain, serum_match, metadata)
 
@@ -278,9 +304,13 @@ if __name__ == '__main__':
 
     write_titers(args.output, titers)
 
+
+    # Log out hardcoded titer strain name changes where the corrected name wasn't found in the metadata
+    for pair, count in hardcoded_strains_not_found_in_metadata.items():
+        print(f"[WARNING] Hardcoded strain map TSV changed {pair[0]!r} → {pair[1]!r}, but the latter is not found in the metadata. Strain appears {count:,} times", file=sys.stderr)
+
     # Log out titer strains which match curated strains when simplified, as we want to either
     # update the curated metadata to match the titers or remap the titer strain to match.
-    # (Remapping titer strains like this is not yet implemented TODO XXX)
     for pair, count in matching_if_simplified_strain_pairs.items():
         print(f"[NEEDS CHECKING] Titer strain {pair[0]!r} would match curated strain {pair[1]!r} if simplified. Strain appears {count:,} times", file=sys.stderr)
 
